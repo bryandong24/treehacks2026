@@ -25,36 +25,53 @@
   - **Avg latency: 7.06 ms** (min 2.93 ms, max 8.74 ms) on CUDA
   - Compared to ~34 ms on CPU fallback (~5x speedup)
 
+### 5. `driving_policy.onnx` on CUDA — DONE
+- Loaded and ran with CUDAExecutionProvider using dummy inputs
+- Results:
+  - Input: `desire_pulse` [1,25,8] fp16, `traffic_convention` [1,2] fp16, `features_buffer` [1,25,512] fp16
+  - Output: [1,1000] float16 — matches expected policy output size
+  - **Avg latency: 0.93 ms** (min 0.88 ms, max 1.31 ms) on CUDA
+  - No NaN/Inf in output, valid value range [-32, 208]
+
+### 6. `dmonitoring_model.onnx` on CUDA — DONE
+- Loaded and ran with CUDAExecutionProvider
+- Results:
+  - Input: `input_img` [1,1382400] uint8 (1440x960 Y-channel), `calib` [1,3] float32
+  - Output: [1,551] float16 — matches expected dmonitoring output size
+  - **Avg latency: 3.83 ms** (with `ORT_ENABLE_ALL` + `EXHAUSTIVE` cuDNN algo search)
+  - No NaN/Inf in output, face/eye probabilities produce plausible raw logits
+- **Critical finding**: Stock `onnxmodel.py` uses `ORT_DISABLE_ALL` (graph optimizations disabled), which causes Conv ops to fall back to unoptimized cuDNN paths (~93ms). Enabling `ORT_ENABLE_ALL` fuses the graph and brings latency down to ~4ms. **Must use `ORT_ENABLE_ALL` for Jetson Thor.**
+- TensorRT provider failed due to missing `libnvinfer.so.10` — TensorRT libraries not installed. Not critical since CUDA+optimizations is already fast. Can install later for further gains.
+
+### All Three Models — Latency Summary
+| Model | Avg Latency | Output | Status |
+|---|---|---|---|
+| `driving_vision.onnx` | 7.06 ms | [1,1576] fp16 | PASS |
+| `driving_policy.onnx` | 0.93 ms | [1,1000] fp16 | PASS |
+| `dmonitoring_model.onnx` | 3.83 ms | [1,551] fp16 | PASS |
+| **Total driving pipeline** | **~8 ms** | — | Well within 50ms budget |
+
 ---
 
+### 7. Rewrite OpenCL Kernels as CUDA (CuPy) — DONE
+- Replaced entire OpenCL pipeline with pure Python + CuPy CUDA:
+  - `selfdrive/modeld/transforms/cuda_transforms.py` — CUDA warp kernel (RawKernel) + loadyuv + frame classes
+  - `selfdrive/modeld/transforms/test_cuda_transforms.py` — comprehensive test suite
+- **Components implemented**:
+  - `warpPerspective` CUDA RawKernel — line-by-line translation of `transform.cl` with bilinear interpolation
+  - `transform_scale_buffer()` — port of `common/mat.h` pixel-center scaling
+  - `loadyuv()` — replaces `loadyuv.cl` loadys/loaduv kernels using CuPy array slicing
+  - `DrivingModelFrame` — full temporal buffer management (warp Y/U/V → pack → shift → output oldest+newest)
+  - `MonitoringModelFrame` — Y-plane warp only for driver monitoring
+- **CuPy installed**: `cupy-cuda12x` v13.6.0 with `libnvrtc.so.12` symlink for CUDA 13 compatibility
+- **All tests pass**: identity warp, translation warp, loadyuv sub-plane packing, temporal buffer, ONNX integration
+- **ONNX integration verified**: preprocessed output → driving_vision.onnx → valid [1,1576] fp16 output, no NaN/Inf
+- **Performance**:
+  - DrivingModelFrame (1928×1208 → 512×256): **avg 1.09ms** (min 0.92ms)
+  - MonitoringModelFrame (1928×1208 → 1440×960): **avg 1.16ms** (min 0.59ms)
+  - Well within 5ms target
+
 ## TODO — Next Steps
-
-### 5. Test `driving_policy.onnx` on CUDA
-- Load and run the policy model with dummy inputs on CUDAExecutionProvider
-- Verify input/output shapes match what modeld.py expects
-- Benchmark latency
-
-### 6. Test `dmonitoring_model.onnx` on CUDA
-- Load and run driver monitoring model
-- Verify latency is acceptable for real-time operation
-
-### 7. Rewrite OpenCL Kernels as CUDA Kernels
-**Critical — Jetson Thor does NOT support OpenCL.**
-
-The stock sunnypilot uses OpenCL for image preprocessing before feeding the model. These must be rewritten as CUDA kernels:
-
-- **Perspective warp**: Transforms raw camera image to model input space using a 3x3 warp matrix (from `get_warp_matrix()` in `common/transformations/model.py`). This corrects for camera mounting, calibration, and maps to the model's expected viewpoint.
-- **YUV420 channel packing**: The camera provides YUV420 planar data. The model expects 6 channels per frame: 4 subsampled Y channels `[Y[::2,::2], Y[::2,1::2], Y[1::2,::2], Y[1::2,1::2]]` + U + V, packed into a `[6, 128, 256]` uint8 tensor.
-
-Key files to study:
-- `selfdrive/modeld/models/commonmodel.cc` — C++ image transform code
-- `selfdrive/modeld/models/commonmodel_pyx.pyx` — Cython bindings for DrivingModelFrame
-- `selfdrive/modeld/runners/` — tinygrad runner helpers
-
-Options:
-- Write CUDA kernels (`.cu`) using PyCUDA or CuPy
-- Use NVIDIA NPP (NVIDIA Performance Primitives) for warp/resize
-- Use custom CUDA C extensions compiled with nvcc
 
 ### 8. Build ONNX-Based Model Runner
 - Replace the tinygrad-based `ModelState` in `modeld.py` with an ONNX Runtime session
@@ -123,16 +140,17 @@ Options:
        │ img              │ big_img
        ▼                  ▼
 ┌─────────────────────────────────┐
-│  driving_vision.onnx (CUDA)  ✅ │
-│  [1,12,128,256] uint8 → [1,1576]│
-└──────────────┬──────────────────┘
+│  driving_vision.onnx (CUDA)  ✅  │
+│  [1,12,128,256] uint8 → [1,1576] │
+│  ~7ms                             │
+└──────────────┬────────────────────┘
                │ hidden_state (512-dim)
                ▼
-┌─────────────────────────────────┐
-│  driving_policy.onnx (CUDA)     │
-│  features + desire + traffic    │
-│  → driving plan                 │
-└──────────────┬──────────────────┘
+┌───────────────────────────────────┐
+│  driving_policy.onnx (CUDA)  ✅   │
+│  features + desire + traffic      │
+│  → driving plan  ~1ms             │
+└──────────────┬────────────────────┘
                │
                ▼
 ┌─────────────────────────────────┐
@@ -156,5 +174,7 @@ Options:
 
 ## Notes
 - The DRM warning (`/sys/class/drm/card3/device/vendor`) is harmless — Jetson sysfs quirk, does not affect CUDA inference
-- TensorRT execution provider is also available — could provide further speedup after CUDA path is stable
-- Model runs at 20 Hz (50ms budget per frame); vision model alone takes ~7ms on CUDA, leaving good headroom
+- TensorRT provider listed as available but fails at runtime — needs `libnvinfer.so.10` (TensorRT libs). Install later for potential further speedup.
+- **IMPORTANT**: Must use `ORT_ENABLE_ALL` graph optimization level on Jetson Thor. Stock code uses `ORT_DISABLE_ALL` which causes Conv fallback (~93ms for dmon). With `ORT_ENABLE_ALL` + `EXHAUSTIVE` cuDNN algo search, all models run in single-digit ms.
+- Model runs at 20 Hz (50ms budget per frame); full driving pipeline (vision + policy) takes ~8ms on CUDA, leaving 42ms headroom
+- Driver monitoring runs on a separate thread; at ~4ms per inference it can easily sustain 20+ Hz
