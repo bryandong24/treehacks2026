@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Launcher for jetson-containers build.sh, run.sh, and autotag
+ROOT="$(dirname "$(readlink -f "$0")")"
+VENV="$ROOT/venv"
+if [ -f "$VENV/bin/activate" ]; then
+    source "$VENV/bin/activate"
+fi
+SCRIPTS="$ROOT/scripts"
+COMMAND=$1
+
+shift;
+
+if [ "$COMMAND" = "build" ] || [ "$COMMAND" = "build.sh" ]; then
+	$ROOT/build.sh "$@"
+elif [ "$COMMAND" = "run" ] || [ "$COMMAND" = "run.sh" ]; then
+	$ROOT/run.sh "$@"
+elif [ "$COMMAND" = "list" ]; then
+	$ROOT/build.sh --list "$@"
+elif [ "$COMMAND" = "show" ]; then
+	$ROOT/build.sh --show "$@"
+elif [ "$COMMAND" = "autotag" ]; then
+	$ROOT/autotag "$@"
+elif [ "$COMMAND" = "update" ]; then
+	cd $ROOT
+	git pull
+elif [ "$COMMAND" = "db" ]; then
+	PYTHONPATH="$PYTHONPATH:$ROOT" python3 -m jetson_containers.db "$@"
+elif [ "$COMMAND" = "root" ]; then
+	echo $ROOT
+elif [ "$COMMAND" = "data" ]; then
+	echo $ROOT/data
+else
+	echo ''
+	echo 'jetson-containers > Invalid command'
+	echo ''
+	echo '   * build [PACKAGES]'
+	echo '   * run OPTIONS [CONTAINER:TAG] CMD'
+	echo '   * list [PACKAGES|*'
+	echo '   * show [PACKAGES]*'
+	echo '   * autotag [CONTAINER]'
+	echo '   * update (runs git pull)'
+	echo '   * db   (sync database)'
+	echo '   * root (prints repo path)'
+	echo '   * data (prints data path)'
+	echo ''
+	echo 'Run "jetson-containers <CMD> --help" for more info.'
+	exit 1
+fi
