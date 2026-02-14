@@ -1,9 +1,16 @@
 # Sunnypilot on Jetson AGX Thor — Progress Tracker
 
+## Platform
+- **Hardware**: NVIDIA Jetson AGX Thor
+- **JetPack**: 7.1 (L4T R38.4.0)
+- **CUDA**: 13.0
+- **Kernel**: 6.8.12-tegra
+- **OS**: Ubuntu 24.04.4 LTS (Noble)
+
 ## Completed
 
 ### 1. ONNX Runtime with CUDA — DONE
-- Built a compatible onnxruntime wheel for Jetson Thor (aarch64, CUDA 13.0) using jetson-containers
+- Built a compatible onnxruntime wheel for Jetson Thor (aarch64, CUDA 13.0, JetPack 7.1) using jetson-containers
 - Installed into sunnypilot venv at `/home/subha/treehacks2026/sunnypilot/.venv`
 - Standard `pip install onnxruntime-gpu` does NOT work on Jetson — must build from jetson-containers
 
@@ -71,15 +78,62 @@
   - MonitoringModelFrame (1928×1208 → 1440×960): **avg 1.16ms** (min 0.59ms)
   - Well within 5ms target
 
+### 8. Build ONNX-Based Model Runner — DONE
+- Replaced tinygrad/OpenCL `ModelState` in both `modeld.py` and `dmonitoringmodeld.py` with ONNX Runtime + CUDA
+- **Changes to `selfdrive/modeld/modeld.py`**:
+  - Removed all tinygrad, OpenCL, CLContext, TICI/USBGPU imports and code
+  - `ModelState.__init__()`: creates two `ort.InferenceSession` (vision + policy) with `ORT_ENABLE_ALL` + `EXHAUSTIVE` cuDNN
+  - `ModelState.run()`: CUDA preprocessing via `CUDADrivingModelFrame.prepare()` → ONNX vision inference → ONNX policy inference (fp16 inputs)
+  - `main()`: no CLContext, VisionIpcClient without CL context arg
+  - All downstream code (InputQueues, fill_model_msg, cereal publishing) unchanged
+- **Changes to `selfdrive/modeld/dmonitoringmodeld.py`**:
+  - Same pattern: removed tinygrad/OpenCL, replaced with ONNX RT session
+  - `CUDAMonitoringModelFrame.prepare()` for Y-plane warp → ONNX inference (input_img uint8 + calib float32)
+  - All output parsing (slice_outputs, parse_model_output, fill_driver_data) unchanged
+- **Generated metadata pickle files** from ONNX model metadata:
+  - `driving_vision_metadata.pkl`, `driving_policy_metadata.pkl`, `dmonitoring_model_metadata.pkl`
+  - Generated via `sunnypilot/modeld/get_model_metadata.py` — keeps all metadata loading code unchanged
+
+### 9. Cython Extensions Compiled — DONE
+- Compiled all required Cython `.so` extensions using `scons --minimal`:
+  - `msgq_repo/msgq/ipc_pyx.so` (955KB) — IPC messaging (Context, PubSocket, SubSocket, Poller)
+  - `msgq_repo/msgq/visionipc/visionipc_pyx.so` (2.5MB) — VisionIPC (Server, Client, VisionBuf, VisionStreamType)
+  - `common/params_pyx.so` — Params key-value store
+  - `rednose/helpers/ekf_sym_pyx.so` — Kalman filter helpers
+- Created `sunnypilot/modeld/runners/runmodel_pyx.py` — Python stub for the old tinygrad runner (not needed on Jetson)
+- **All imports verified**: `cereal.messaging`, `msgq.visionipc`, `openpilot.common.params`, full modeld.py import chain works
+
+### 10. End-to-End Pipeline Validation — DONE
+- **Standalone pipeline test** (`selfdrive/modeld/test_pipeline_e2e.py`):
+  - Tests CUDA preprocessing + vision + policy + dmon inference with synthetic NV12 frames
+  - 100-frame sustained 20Hz simulation: **0 missed deadlines** out of 100 frames
+  - All model outputs validated (plan, hidden_state, lane_lines_prob, lead_prob, meta, desire_state, pose, face/eye probabilities)
+- **VisionIPC integration test** (`selfdrive/modeld/test_vipc_e2e.py`):
+  - Creates VisionIPC server publishing fake camera frames
+  - Connects VisionIPC clients, receives frames through shared memory
+  - Full pipeline: VisionIPC recv → CUDA preprocess → ONNX vision → ONNX policy → output parsing
+  - Frame data integrity verified: sent == received through VisionIPC round-trip
+
+#### Verified Latency (steady-state, excluding warmup)
+
+| Stage | Avg | Min | Max | p95 |
+|---|---|---|---|---|
+| CUDA preprocess (both cams) | 1.81 ms | 1.49 ms | 2.48 ms | 2.22 ms |
+| Vision ONNX inference | 5.33 ms | 3.46 ms | 8.55 ms | 8.40 ms |
+| Policy ONNX inference | 1.22 ms | 0.84 ms | 1.86 ms | 1.74 ms |
+| **Total driving pipeline** | **8.66 ms** | 6.06 ms | 12.53 ms | 12.34 ms |
+| DMonitoring preprocess | 0.50 ms | 0.47 ms | 0.59 ms | 0.56 ms |
+| DMonitoring inference | 3.64 ms | 3.49 ms | 3.94 ms | 3.88 ms |
+| **Total DMonitoring** | **4.15 ms** | 3.99 ms | 4.45 ms | 4.39 ms |
+| **Total all (driving + dmon)** | **11.03 ms** | 8.85 ms | 22.06 ms | 20.18 ms |
+| **Budget (20Hz)** | **50 ms** | — | — | — |
+| **Headroom** | **~39 ms** | — | — | — |
+
+---
+
 ## TODO — Next Steps
 
-### 8. Build ONNX-Based Model Runner
-- Replace the tinygrad-based `ModelState` in `modeld.py` with an ONNX Runtime session
-- The current flow loads `.pkl` tinygrad models; we need to load `.onnx` files instead
-- Wire up: camera frames → CUDA preprocessing → ONNX vision model → features → ONNX policy model → driving plan
-- Maintain the same output format so downstream code (fill_model_msg, controls) works unchanged
-
-### 9. Camera Integration
+### 11. Camera Integration
 - Our cameras: 120-degree FOV + 90-degree FOV
 - Sunnypilot expects:
   - `fcam`: ~52-degree FOV (comma OX03C10/OS04C10)
@@ -90,7 +144,7 @@
   - The warp matrix compensates for FOV differences, but intrinsics must be correct
   - Test with VisionIPC or write a custom camera feed adapter
 
-### 10. IMU + GPS Integration
+### 12. IMU + GPS Integration
 - Sunnypilot **requires** IMU (accelerometer + gyroscope) — hard dependency
 - Stock uses LSM6DS3 at 104 Hz via I2C through `system/sensord/sensord.py`
 - Need to:
@@ -99,20 +153,20 @@
   - Ensure data freshness < 100ms and passes sanity checks (accel < 100 m/s^2, rotation < 10 rad/s)
 - GPS feeds into `locationd` for position — needed for navigation but less critical than IMU for core driving
 
-### 11. Honda Bosch CAN Interface
+### 13. Honda Bosch CAN Interface
 - Vehicle: Honda Bosch platform
 - Need panda OBD-II adapter (or compatible CAN interface) connected to Jetson
 - Verify opendbc Honda Bosch DBC definitions work
 - Test CAN read (steering angle, wheel speeds, brake) and CAN write (steering torque, gas, brake)
 
-### 12. VisionIPC / Camera Pipeline
+### 14. VisionIPC / Camera Pipeline
 - Stock sunnypilot uses `camerad` → VisionIPC shared memory → `modeld`
 - Need to either:
   - Write a custom `camerad` for our camera hardware on Jetson
   - Or feed frames via V4L2 → VisionIPC adapter
 - Must provide both road and wide camera streams simultaneously
 
-### 13. Full System Integration Test
+### 15. Full System Integration Test
 - Run full sunnypilot stack on Jetson Thor with:
   - Camera feeds (both streams)
   - ONNX models on CUDA
@@ -133,7 +187,7 @@
        │                  │
        ▼                  ▼
 ┌─────────────────────────────────┐
-│  CUDA Kernels (TODO)            │
+│  CUDA Kernels (CuPy)  ✅        │
 │  • Perspective warp             │
 │  • YUV420 channel packing       │
 └──────┬──────────────────┬───────┘
@@ -173,6 +227,7 @@
 ---
 
 ## Notes
+- **CuPy libnvrtc symlink**: CuPy (cupy-cuda12x) looks for `libnvrtc.so.12` but Jetson Thor has CUDA 13 (`libnvrtc.so.13`). Symlink created at `.venv/lib/libnvrtc.so.12 → /usr/local/cuda/lib64/libnvrtc.so.13`. Must set `LD_LIBRARY_PATH` to include `.venv/lib` when running, or create a system-level symlink.
 - The DRM warning (`/sys/class/drm/card3/device/vendor`) is harmless — Jetson sysfs quirk, does not affect CUDA inference
 - TensorRT provider listed as available but fails at runtime — needs `libnvinfer.so.10` (TensorRT libs). Install later for potential further speedup.
 - **IMPORTANT**: Must use `ORT_ENABLE_ALL` graph optimization level on Jetson Thor. Stock code uses `ORT_DISABLE_ALL` which causes Conv fallback (~93ms for dmon). With `ORT_ENABLE_ALL` + `EXHAUSTIVE` cuDNN algo search, all models run in single-digit ms.

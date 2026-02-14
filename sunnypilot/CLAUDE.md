@@ -4,7 +4,7 @@
 Port sunnypilot to run on the **NVIDIA Jetson AGX Thor** to drive a **Honda Bosch** vehicle. The stock sunnypilot runs on comma.ai hardware (Qualcomm Snapdragon) using tinygrad + OpenCL. We are replacing that with **ONNX Runtime + CUDA** on the Jetson Thor.
 
 ## Hardware
-- **Compute**: NVIDIA Jetson AGX Thor (CUDA 13.0, Driver 580.00, L4T R38.4.0, Tegra 6.8.12 kernel)
+- **Compute**: NVIDIA Jetson AGX Thor (JetPack 7.1, CUDA 13.0, Driver 580.00, L4T R38.4.0, Tegra 6.8.12 kernel)
 - **Cameras**: Two cameras — 120-degree FOV and 90-degree FOV
   - Sunnypilot expects:
     - `fcam` (forward/road camera): ~52-degree horizontal FOV (OX03C10/OS04C10 on comma hardware) — primary camera for lane detection, lead vehicles, road edges

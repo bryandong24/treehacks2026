@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 import os
-from openpilot.system.hardware import TICI
-os.environ['DEV'] = 'QCOM' if TICI else 'CPU'
-from tinygrad.tensor import Tensor
-from tinygrad.dtype import dtypes
 import time
 import pickle
 import numpy as np
+import onnxruntime as ort
 from pathlib import Path
 
 from cereal import messaging
@@ -16,13 +13,12 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.realtime import config_realtime_process
 from openpilot.common.transformations.model import dmonitoringmodel_intrinsics
 from openpilot.common.transformations.camera import _ar_ox_fisheye, _os_fisheye
-from openpilot.selfdrive.modeld.models.commonmodel_pyx import CLContext, MonitoringModelFrame
+from openpilot.selfdrive.modeld.transforms.cuda_transforms import MonitoringModelFrame as CUDAMonitoringModelFrame
 from openpilot.selfdrive.modeld.parse_model_outputs import sigmoid, safe_exp
-from openpilot.selfdrive.modeld.runners.tinygrad_helpers import qcom_tensor_from_opencl_address
 
 PROCESS_NAME = "selfdrive.modeld.dmonitoringmodeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
-MODEL_PKL_PATH = Path(__file__).parent / 'models/dmonitoring_model_tinygrad.pkl'
+MODEL_ONNX_PATH = Path(__file__).parent / 'models/dmonitoring_model.onnx'
 METADATA_PATH = Path(__file__).parent / 'models/dmonitoring_model_metadata.pkl'
 
 
@@ -30,36 +26,44 @@ class ModelState:
   inputs: dict[str, np.ndarray]
   output: np.ndarray
 
-  def __init__(self, cl_ctx):
+  def __init__(self):
     with open(METADATA_PATH, 'rb') as f:
       model_metadata = pickle.load(f)
       self.input_shapes = model_metadata['input_shapes']
       self.output_slices = model_metadata['output_slices']
 
-    self.frame = MonitoringModelFrame(cl_ctx)
+    self.frame = CUDAMonitoringModelFrame()
     self.numpy_inputs = {
       'calib': np.zeros(self.input_shapes['calib'], dtype=np.float32),
     }
 
-    self.tensor_inputs = {k: Tensor(v, device='NPY').realize() for k,v in self.numpy_inputs.items()}
-    with open(MODEL_PKL_PATH, "rb") as f:
-      self.model_run = pickle.load(f)
+    # ONNX Runtime session with CUDAExecutionProvider
+    sess_options = ort.SessionOptions()
+    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    cuda_provider_options = {
+      'cudnn_conv_algo_search': 'EXHAUSTIVE',
+    }
+    providers = [('CUDAExecutionProvider', cuda_provider_options), 'CPUExecutionProvider']
+    self.session = ort.InferenceSession(str(MODEL_ONNX_PATH), sess_options, providers=providers)
 
   def run(self, buf: VisionBuf, calib: np.ndarray, transform: np.ndarray) -> tuple[np.ndarray, float]:
     self.numpy_inputs['calib'][0,:] = calib
 
     t1 = time.perf_counter()
 
-    input_img_cl = self.frame.prepare(buf, transform.flatten())
-    if TICI:
-      # The imgs tensors are backed by opencl memory, only need init once
-      if 'input_img' not in self.tensor_inputs:
-        self.tensor_inputs['input_img'] = qcom_tensor_from_opencl_address(input_img_cl.mem_address, self.input_shapes['input_img'], dtype=dtypes.uint8)
-    else:
-      self.tensor_inputs['input_img'] = Tensor(self.frame.buffer_from_cl(input_img_cl).reshape(self.input_shapes['input_img']), dtype=dtypes.uint8).realize()
+    # CUDA preprocessing: warp Y plane
+    input_img = self.frame.prepare(
+      buf.data, buf.width, buf.height, buf.stride, buf.uv_offset,
+      transform.flatten()
+    ).reshape(self.input_shapes['input_img'])
 
-
-    output = self.model_run(**self.tensor_inputs).numpy().flatten()
+    # ONNX Runtime inference
+    feeds = {
+      'input_img': input_img,
+      'calib': self.numpy_inputs['calib'],
+    }
+    result = self.session.run(None, feeds)
+    output = result[0].astype(np.float32).flatten()
 
     t2 = time.perf_counter()
     return output, t2 - t1
@@ -107,12 +111,11 @@ def get_driverstate_packet(model_output, frame_id: int, location_ts: int, exec_t
 def main():
   config_realtime_process(7, 5)
 
-  cl_context = CLContext()
-  model = ModelState(cl_context)
+  model = ModelState()
   cloudlog.warning("models loaded, dmonitoringmodeld starting")
 
   cloudlog.warning("connecting to driver stream")
-  vipc_client = VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_DRIVER, True, cl_context)
+  vipc_client = VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_DRIVER, True)
   while not vipc_client.connect(False):
     time.sleep(0.1)
   assert vipc_client.is_connected()
