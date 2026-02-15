@@ -1,3 +1,6 @@
 [submodule "mobileApp"]
 	path = mobileApp
 	url = https://github.com/JoelGrayson/Treehacks2026.git
+[submodule "holoscan-sensor-bridge"]
+	path = holoscan-sensor-bridge
+	url = https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
