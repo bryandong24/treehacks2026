@@ -41,11 +41,36 @@ Replaced the entire OpenCL pipeline with CuPy CUDA kernels:
 ### ONNX-Based Model Runner
 Replaced tinygrad/OpenCL model runner with ONNX Runtime + CUDA sessions for both the driving model and driver monitoring model.
 
-### Camera Integration
-- Two IMX274 cameras via NVIDIA Holoscan Sensor Bridge running in Docker
-- Shared memory ring buffer (`/dev/shm`) for zero-copy frame transfer from Docker → host
-- RGBA uint16 → NV12 uint8 conversion via CuPy CUDA kernel
-- Publishes via VisionIPC at 20 Hz
+### Camera Integration via Holoscan Sensor Bridge ([`holoscan-sensor-bridge/`](holoscan-sensor-bridge/))
+Two IMX274 cameras are connected to the Jetson AGX Thor through a [Lattice CPNX100 Holoscan Sensor Bridge](https://www.latticesemi.com/products/developmentboardsandkits/certuspro-nx-sensor-to-ethernet-bridge-board) board. The FPGA bridges MIPI camera data to 10GbE UDP, which ConnectX NICs can write directly into GPU memory via RDMA.
+
+**FPGA firmware flashing:**
+The Lattice CPNX100 board requires its FPGA bitstream to be programmed before use. This is done from inside the Holoscan Sensor Bridge Docker container:
+```bash
+# 1. Connect ethernet from Jetson to the sensor bridge board (J6 for cam 0, J3 for cam 1)
+# 2. Verify connectivity
+ping 192.168.0.2
+
+# 3. Launch the Holoscan Sensor Bridge Docker container
+cd holoscan-sensor-bridge
+xhost +
+sh docker/demo.sh
+
+# 4. Flash the FPGA bitstream to on-board SPI flash (~50 min)
+#    Use --force if upgrading from an older bitstream version
+program_lattice_cpnx100 scripts/manifest.yaml
+
+# 5. Program the FPGA from the SPI flash (~1 min)
+#    The board must be power-cycled after programming
+```
+
+The flash tool (`tools/program_lattice_cpnx100/`) programs both the CLNX17 (MIPI bridge) and CPNX100 (main 10GbE) FPGAs via SPI, with MD5 checksum verification and automatic firmware download.
+
+**Camera pipeline:**
+- Holoscan captures frames inside Docker, converts RGBA uint16 → NV12 uint8 via a CuPy CUDA kernel
+- Frames are passed to the host through a lock-free `/dev/shm` ring buffer (4 slots, sequence-counter torn-read detection)
+- Host-side `jetson_camerad` publishes via VisionIPC + cereal at 20 Hz
+- Camera 0 (90° FOV) → road camera, Camera 1 (120° FOV) → wide camera
 
 ### IMU Integration
 - LSM6DSOX IMU → Arduino (I2C) → CP2104 USB-UART → `/dev/IMU`
