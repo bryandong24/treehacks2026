@@ -165,6 +165,8 @@ def main():
         "latitude": lat,
         "longitude": lon,
         "bearing": bearing,
+        "speed": speed,
+        "timestamp": time.time(),
       }))
 
     sample_count += 1

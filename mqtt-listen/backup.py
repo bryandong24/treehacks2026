@@ -1,4 +1,5 @@
 import paho.mqtt.client as mqtt
+import subprocess
 import threading
 import json
 import time
@@ -10,10 +11,11 @@ SUBSCRIBE_TOPIC = "from-phone/command-car"
 GPS_TOPIC = "from-car/gps-info"
 NAV_STATUS_TOPIC = "from-car/nav-status"
 
+SERIAL_PORT = "/dev/ttyACM0"
+SERIAL_BAUD = "460800"
+
 NAV_DESTINATION_PATH = "/dev/shm/nav_destination.json"
 NAV_PROGRESS_PATH = "/dev/shm/nav_progress.json"
-LAST_GPS_POSITION_PATH = "/dev/shm/params/d/LastGPSPosition"
-GPS_POLL_RATE = 1.0       # seconds
 PROGRESS_POLL_RATE = 1.0  # seconds — match navd 1Hz rate
 
 
@@ -51,42 +53,48 @@ def on_message(client, userdata, msg):
 
 
 def gps_reader(client):
-    """Poll LastGPSPosition written by sunnypilot's serial_gps, publish to MQTT."""
-    last_timestamp = 0.0
-
+    """Read GPS from serial port, publish to MQTT."""
     while True:
         try:
-            with open(LAST_GPS_POSITION_PATH, "r") as f:
-                raw = f.read().strip()
-            if not raw or raw == "{}":
-                time.sleep(GPS_POLL_RATE)
-                continue
-            data = json.loads(raw)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            time.sleep(GPS_POLL_RATE)
-            continue
+            subprocess.run(
+                ["stty", "-F", SERIAL_PORT, SERIAL_BAUD, "raw", "-echo"],
+                check=True,
+            )
+            print(f"[GPS] Configured {SERIAL_PORT} at {SERIAL_BAUD} baud")
 
-        ts = data.get("timestamp", 0.0)
-        if ts == last_timestamp:
-            time.sleep(GPS_POLL_RATE)
-            continue
-        last_timestamp = ts
+            proc = subprocess.Popen(
+                ["cat", SERIAL_PORT],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            print(f"[GPS] Reading from {SERIAL_PORT}...")
 
-        gps_payload = json.dumps({
-            "latitude": data["latitude"],
-            "longitude": data["longitude"],
-            "bearing": data.get("bearing", 0.0),
-            "speed": data.get("speed", 0.0),
-            "timestamp": ts,
-        })
-        client.publish(GPS_TOPIC, gps_payload)
-        print(f"[GPS] {gps_payload}")
+            for raw_line in proc.stdout:
+                decoded = raw_line.decode("utf-8", errors="replace").strip()
+                if not decoded:
+                    continue
+                parts = decoded.split(",")
+                if len(parts) >= 2:
+                    try:
+                        payload = json.dumps({
+                            "latitude": float(parts[0]),
+                            "longitude": float(parts[1]),
+                            "timestamp": time.time(),
+                        })
+                        print(f"[GPS] {payload}")
+                        client.publish(GPS_TOPIC, payload)
+                    except ValueError:
+                        print(f"[GPS] skipping bad line: {decoded}")
 
-        time.sleep(GPS_POLL_RATE)
+            proc.wait()
+            print(f"[GPS] cat exited with code {proc.returncode}, restarting...")
+        except Exception as e:
+            print(f"[GPS] reader error: {e} — retrying in 2s...")
+            time.sleep(2)
 
 
 def progress_reader(client):
-    """Poll nav_progress.json written by navd, publish nav status to MQTT."""
+    """Poll nav_progress.json written by navd, publish GPS + nav status to MQTT."""
     last_timestamp = 0.0
 
     while True:
@@ -102,6 +110,17 @@ def progress_reader(client):
             time.sleep(PROGRESS_POLL_RATE)
             continue
         last_timestamp = ts
+
+        # Publish GPS position
+        gps = data.get("gps", {})
+        if gps.get("has_fix", False):
+            gps_payload = json.dumps({
+                "latitude": gps["latitude"],
+                "longitude": gps["longitude"],
+                "timestamp": ts,
+            })
+            client.publish(GPS_TOPIC, gps_payload)
+            print(f"[GPS] {gps_payload}")
 
         # Publish navigation status
         nav = data.get("navigation", {})
@@ -131,12 +150,10 @@ def main():
     print(f"Connecting to {BROKER}:{PORT}...")
     client.connect(BROKER, PORT, keepalive=60)
 
-    # Start GPS reader — reads LastGPSPosition from sunnypilot's serial_gps via /dev/shm
-    # (only one process can read /dev/ttyACM0, so we read the param file instead)
+    # Start GPS reader — reads serial port, publishes to MQTT
     gps_thread = threading.Thread(target=gps_reader, args=(client,), daemon=True)
     gps_thread.start()
-    print(f"Started GPS reader, polling {LAST_GPS_POSITION_PATH}")
-    print(f"Publishing GPS to {GPS_TOPIC}")
+    print(f"Started GPS reader ({SERIAL_PORT}), publishing to {GPS_TOPIC}")
 
     # Start progress reader — polls navd output, publishes nav status to MQTT
     progress_thread = threading.Thread(target=progress_reader, args=(client,), daemon=True)
