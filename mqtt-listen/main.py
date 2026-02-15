@@ -1,6 +1,8 @@
 import paho.mqtt.client as mqtt
 import serial
 import threading
+import json
+import time
 
 BROKER = "34.134.81.0"
 PORT = 1883
@@ -35,15 +37,20 @@ def serial_reader(client):
                 if line:
                     decoded = line.decode("utf-8", errors="replace").strip()
                     if decoded:
-                        print(f"[GPS] {decoded}")
-                        client.publish(PUBLISH_TOPIC, decoded)
+                        parts = decoded.split(",")
+                        if len(parts) >= 2:
+                            payload = json.dumps({
+                                "latitude": float(parts[0]),
+                                "longitude": float(parts[1]),
+                                "timestamp": time.time(),
+                            })
+                            print(f"[GPS] {payload}")
+                            client.publish(PUBLISH_TOPIC, payload)
         except serial.SerialException as e:
             print(f"Serial error: {e} — retrying in 2s...")
-            import time
             time.sleep(2)
         except Exception as e:
             print(f"Unexpected error reading serial: {e} — retrying in 2s...")
-            import time
             time.sleep(2)
 
 
