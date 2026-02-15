@@ -1,0 +1,3 @@
+[submodule "mobileApp"]
+	path = mobileApp
+	url = https://github.com/JoelGrayson/Treehacks2026.git
