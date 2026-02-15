@@ -131,9 +131,49 @@
 
 ---
 
+### 11. USB Webcam → Driving Model Pipeline — DONE
+- **Test file**: `selfdrive/modeld/test_webcam.py`
+- Captures live frames from a USB webcam, converts BGR→NV12, and runs the full pipeline:
+  - CUDA preprocessing (warp + YUV packing) → ONNX vision inference → ONNX policy inference
+- Constructs a proper warp matrix from webcam intrinsics (estimated ~65° HFOV) using `calib_from_medmodel`
+- Runs 30 frames with full model output parsing (plan, lane lines, lead prob, pose, desire state)
+- **Verifies**: real sensor data flows through the entire CUDA + ONNX pipeline end-to-end
+- Note: model outputs are not meaningful (webcam isn't mounted like a car camera), but this confirms the full pipeline works with real image data from a real sensor on CUDA
+
+### 12. Serial IMU Integration (LSM6DSOX via USB-UART) — DONE
+- **Hardware**: LSM6DSOX IMU → Arduino/Feather (I2C) → CP2104 USB-UART bridge → `/dev/ttyUSB0`
+- **udev rule**: `/etc/udev/rules.d/13-imu.rules` creates persistent `/dev/IMU` symlink (matches CP2104 serial `02896079`, mode `0666`)
+- **Daemon**: `system/sensord/serial_imu.py`
+  - Opens `/dev/IMU` at 460800 baud, reads ASCII CSV lines (`ax,ay,az,gx,gy,gz`)
+  - Values arrive pre-scaled in m/s² (accel) and rad/s (gyro) from the Arduino
+  - Publishes cereal `accelerometer` + `gyroscope` messages at 104 Hz via `Ratekeeper`
+  - Uses `SensorSource.lsm6ds3` (LSM6DSOX same family, accepted by locationd)
+  - Drains serial buffer each cycle to always use the freshest sample
+  - Uses `time.monotonic_ns()` for timestamps (must match `logMonoTime` clock domain — `time.time_ns()` differs by ~56 years on this system)
+- **E2E sensor test**: `system/sensord/test_serial_imu.py`
+  - Runs daemon in background thread, subscribes via `SubMaster` for 5 seconds
+  - Results: **521 samples at 104.2 Hz**, accel norm 10.0 m/s², gyro norm 0.009 rad/s
+  - All values within locationd sanity bounds (accel < 100 m/s², gyro < 10 rad/s)
+
+### 13. IMU → locationd Integration — DONE
+- **Integration test**: `system/sensord/test_serial_imu_locationd.py`
+  - Runs `serial_imu.py` (real IMU) + `locationd.py` (Kalman filter) + mock publishers for `carState` (100Hz), `liveCalibration` (4Hz), `cameraOdometry` (20Hz)
+  - Subscribes to `livePose` output for 10 seconds
+- **Build step**: Compiled `selfdrive/locationd/models/generated/libpose.so` from generated `pose.cpp` (Kalman filter shared library required by `ekf_sym_pyx`)
+- **Results** (197 livePose messages over 10s):
+  - **`sensorsOK: 197/197 (100%)`** — locationd fully accepts serial IMU data
+  - **`inputsOK: 197/197 (100%)`** — all critical service inputs pass validation
+  - **`valid: 197/197 (100%)`** — Kalman filter initialized and producing state estimates
+  - **`posenetOK: 197/197 (100%)`**
+  - Raw IMU: 1040 accel + 1040 gyro samples at 104 Hz
+- **Timestamp fix**: sensor `event.timestamp` must use `time.monotonic_ns()` (not `time.time_ns()`) because locationd compares it against `logMonoTime` which uses the monotonic clock. Wall clock differs from monotonic by ~56 years on this Jetson.
+- **Note**: Kalman filter acceleration/angular velocity estimates drift with mock cameraOdometry (zero motion conflicts with real gravity vector). This is expected and will resolve with real visual odometry.
+
+---
+
 ## TODO — Next Steps
 
-### 11. Camera Integration
+### 14. Camera Integration
 - Our cameras: 120-degree FOV + 90-degree FOV
 - Sunnypilot expects:
   - `fcam`: ~52-degree FOV (comma OX03C10/OS04C10)
@@ -144,29 +184,23 @@
   - The warp matrix compensates for FOV differences, but intrinsics must be correct
   - Test with VisionIPC or write a custom camera feed adapter
 
-### 12. IMU + GPS Integration
-- Sunnypilot **requires** IMU (accelerometer + gyroscope) — hard dependency
-- Stock uses LSM6DS3 at 104 Hz via I2C through `system/sensord/sensord.py`
-- Need to:
-  - Connect external IMU to Jetson Thor
-  - Write or adapt a sensor driver that publishes `accelerometer` and `gyroscope` cereal messages
-  - Ensure data freshness < 100ms and passes sanity checks (accel < 100 m/s^2, rotation < 10 rad/s)
+### 15. GPS Integration
 - GPS feeds into `locationd` for position — needed for navigation but less critical than IMU for core driving
 
-### 13. Honda Bosch CAN Interface
+### 16. Honda Bosch CAN Interface
 - Vehicle: Honda Bosch platform
 - Need panda OBD-II adapter (or compatible CAN interface) connected to Jetson
 - Verify opendbc Honda Bosch DBC definitions work
 - Test CAN read (steering angle, wheel speeds, brake) and CAN write (steering torque, gas, brake)
 
-### 14. VisionIPC / Camera Pipeline
+### 17. VisionIPC / Camera Pipeline
 - Stock sunnypilot uses `camerad` → VisionIPC shared memory → `modeld`
 - Need to either:
   - Write a custom `camerad` for our camera hardware on Jetson
   - Or feed frames via V4L2 → VisionIPC adapter
 - Must provide both road and wide camera streams simultaneously
 
-### 15. Full System Integration Test
+### 18. Full System Integration Test
 - Run full sunnypilot stack on Jetson Thor with:
   - Camera feeds (both streams)
   - ONNX models on CUDA
@@ -213,13 +247,13 @@
 └─────────────────────────────────┘
 
         ┌──────────┐  ┌──────────┐
-        │   IMU    │  │   GPS    │
+        │   IMU  ✅ │  │   GPS    │
         │ (104 Hz) │  │          │
         └────┬─────┘  └────┬─────┘
              │             │
              ▼             ▼
         ┌─────────────────────┐
-        │  locationd (Kalman) │
+        │  locationd (Kalman)✅│
         │  → livePose         │
         └─────────────────────┘
 ```
