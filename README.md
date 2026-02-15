@@ -104,8 +104,30 @@ A native iOS app (SwiftUI) that lets users hail the autonomous vehicle, similar 
 - Car diagnostics tab with live MQTT message log and connection status
 - Auto-reconnecting MQTT client (CocoaMQTT)
 
-### Cloud Inference with Alpamayo ([`alpamayo/`](alpamayo/), [`mqtt-server/`](mqtt-server/))
-We run [NVIDIA Alpamayo R1](https://huggingface.co/nvidia/Alpamayo-R1-10B) (10B parameter Vision-Language-Action model) on a remote H100 GPU to provide high-level scene reasoning alongside the on-device driving stack.
+### H100 Cloud Server ([`mqtt-server/`](mqtt-server/))
+We run an **NVIDIA H100 GPU instance on Google Cloud** (A3 machine type, 80GB HBM3) that serves as the central hub connecting the car, the mobile app, and the Alpamayo model.
+
+**Server setup:**
+The server runs three services:
+1. **Mosquitto MQTT broker** (port 1883) — message bus connecting all components (car, phone, server)
+2. **FastAPI application** (port 8000) — WebSocket endpoints for data ingestion and video relay
+3. **Alpamayo R1 inference** — loaded at startup, runs periodically on buffered frames
+
+```bash
+# On the H100 instance
+cd mqtt-server
+pip install -r requirements.txt
+PYTHONPATH=/path/to/alpamayo/src uvicorn server.main:app --host 0.0.0.0 --port 8000
+```
+
+**What the server does:**
+- **Data ingestion** (`/ws/thor`): The Jetson Thor streams JPEG camera frames + ego-motion data (orientation quaternion, velocity vector from `livePose`) over a msgpack WebSocket at ~10 Hz. The server buffers these in a thread-safe ring buffer, selecting frames at ~100ms intervals for inference.
+- **MQTT relay**: Subscribes to `from-phone/*` and `from-car/*` topics, forwards commands between phone and car (e.g. routing `from-phone/command-car` → `from-server/command-car`), and auto-accepts hail requests with the car's latest GPS position.
+- **Alpamayo inference**: Every ~5 seconds, takes a snapshot of 4 buffered frames + 16 ego-motion history steps and runs Alpamayo R1 inference. Publishes Chain-of-Causation reasoning and trajectory predictions to MQTT.
+- **Video relay** (`/ws/mobile/video`): Forwards the latest JPEG frame from the car to connected mobile clients at ~5 FPS.
+
+### Cloud Inference with Alpamayo ([`alpamayo/`](alpamayo/))
+We run [NVIDIA Alpamayo R1](https://huggingface.co/nvidia/Alpamayo-R1-10B) (10B parameter Vision-Language-Action model) on the H100 server to provide high-level scene reasoning alongside the on-device driving stack.
 
 **How it works:**
 1. The Jetson Thor streams camera frames + ego-motion data (orientation, velocity from `livePose`) to the H100 server over a WebSocket at ~10 Hz
