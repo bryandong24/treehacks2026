@@ -79,6 +79,25 @@ A native iOS app (SwiftUI) that lets users hail the autonomous vehicle, similar 
 - Car diagnostics tab with live MQTT message log and connection status
 - Auto-reconnecting MQTT client (CocoaMQTT)
 
+### Cloud Inference with Alpamayo ([`alpamayo/`](alpamayo/), [`mqtt-server/`](mqtt-server/))
+We run [NVIDIA Alpamayo R1](https://huggingface.co/nvidia/Alpamayo-R1-10B) (10B parameter Vision-Language-Action model) on a remote H100 GPU to provide high-level scene reasoning alongside the on-device driving stack.
+
+**How it works:**
+1. The Jetson Thor streams camera frames + ego-motion data (orientation, velocity from `livePose`) to the H100 server over a WebSocket at ~10 Hz
+2. The server buffers frames and runs Alpamayo inference every few seconds
+3. Alpamayo produces two outputs:
+   - **Chain-of-Causation (CoC) reasoning** — a natural language explanation of what the car sees, why it's making decisions, and causal relationships between scene elements (e.g. "The lead vehicle is braking because a pedestrian is crossing, so I should decelerate")
+   - **Trajectory prediction** — 64 waypoints over a 6.4s horizon at 10 Hz, generated via flow-matching diffusion conditioned on the VLM's reasoning
+4. Results are published over MQTT (`from-server/coc-reasoning`, `from-server/trajectory`)
+5. The mobile app subscribes to these topics and displays the CoC reasoning in real time, so the rider can see *why* the car is doing what it's doing
+
+**Pipeline:**
+```
+Thor cameras + livePose → WebSocket (msgpack) → H100 server → Alpamayo R1 → CoC + trajectory → MQTT → mobile app
+```
+
+The server also relays a live JPEG video feed from the car to the app via a second WebSocket endpoint.
+
 ### Platform Integration
 - Hardware detection via `/JETSON` marker file
 - C++ pandad binary compiled for aarch64 — connects to red panda over USB
