@@ -2,7 +2,10 @@ import os
 import platform
 from pathlib import Path
 
-from openpilot.system.hardware import PC
+from openpilot.system.hardware import PC, JETSON
+
+# Jetson uses home-directory paths like PC (no /data partition)
+_USE_HOME_PATHS = PC or JETSON
 
 DEFAULT_DOWNLOAD_CACHE_ROOT = "/tmp/comma_download_cache"
 
@@ -15,7 +18,7 @@ class Paths:
   def log_root() -> str:
     if os.environ.get('LOG_ROOT', False):
       return os.environ['LOG_ROOT']
-    elif PC:
+    elif _USE_HOME_PATHS:
       return str(Path(Paths.comma_home()) / "media" / "0" / "realdata")
     else:
       return '/data/media/0/realdata/'
@@ -26,7 +29,7 @@ class Paths:
 
   @staticmethod
   def swaglog_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return os.path.join(Paths.comma_home(), "log")
     else:
       return "/data/log/"
@@ -43,55 +46,55 @@ class Paths:
 
   @staticmethod
   def persist_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return os.path.join(Paths.comma_home(), "persist")
     else:
       return "/persist/"
 
   @staticmethod
   def stats_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return str(Path(Paths.comma_home()) / "stats")
     else:
       return "/data/stats/"
 
   @staticmethod
   def stats_sp_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return str(Path(Paths.comma_home()) / "stats")
     else:
       return "/data/stats_sp/"
 
   @staticmethod
   def config_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return Paths.comma_home()
     else:
       return "/tmp/.comma"
 
   @staticmethod
   def shm_path() -> str:
-    if PC and platform.system() == "Darwin":
+    if _USE_HOME_PATHS and platform.system() == "Darwin":
       return "/tmp"  # This is not really shared memory on macOS, but it's the closest we can get
     return "/dev/shm"
 
   @staticmethod
   def model_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return str(Path(Paths.comma_home()) / "media" / "0" / "models")
     else:
       return "/data/media/0/models"
 
   @staticmethod
   def crash_log_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return str(Path(Paths.comma_home()) / "community" / "crashes")
     else:
       return "/data/community/crashes"
 
   @staticmethod
   def mapd_root() -> str:
-    if PC:
+    if _USE_HOME_PATHS:
       return str(Path(Paths.comma_home()) / "media" / "0" / "osm")
     else:
       return "/data/media/0/osm"

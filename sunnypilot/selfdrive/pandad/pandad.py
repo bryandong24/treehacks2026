@@ -42,7 +42,9 @@ def flash_panda(panda_serial: str) -> Panda:
   panda_signature = b"" if panda.bootstub else panda.get_signature()
   cloudlog.warning(f"Panda {panda_serial} connected, version: {panda_version}, signature {panda_signature.hex()[:16]}, expected {fw_signature.hex()[:16]}")
 
-  if panda.bootstub or panda_signature != fw_signature:
+  if not fw_signature:
+    cloudlog.warning("No local firmware available, skipping flash check")
+  elif panda.bootstub or panda_signature != fw_signature:
     cloudlog.info("Panda firmware out of date, update required")
     panda.flash()
     cloudlog.info("Done flashing")
@@ -59,10 +61,11 @@ def flash_panda(panda_serial: str) -> Panda:
     cloudlog.info("Panda still not booting, exiting")
     raise AssertionError
 
-  panda_signature = panda.get_signature()
-  if panda_signature != fw_signature:
-    cloudlog.info("Version mismatch after flashing, exiting")
-    raise AssertionError
+  if fw_signature:
+    panda_signature = panda.get_signature()
+    if panda_signature != fw_signature:
+      cloudlog.info("Version mismatch after flashing, exiting")
+      raise AssertionError
 
   return panda
 

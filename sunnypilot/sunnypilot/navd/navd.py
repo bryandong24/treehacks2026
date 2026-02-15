@@ -10,6 +10,7 @@ Runs at 1 Hz.
 """
 import json
 import math
+import os
 import time
 
 import cereal.messaging as messaging
@@ -21,11 +22,12 @@ from openpilot.sunnypilot.navd.helpers import Coordinate
 
 VALHALLA_CONFIG = "/home/subha/treehacks2026/sunnypilot/data/valhalla/valhalla.json"
 
-# Hardcoded Stanford demo route
-ROUTE_ORIGIN = {"lat": 37.425611, "lon": -122.177434}
-ROUTE_DESTINATION = {"lat": 37.429649, "lon": -122.170194}
+# Dynamic destination IPC files (shared memory)
+NAV_DESTINATION_PATH = "/dev/shm/nav_destination.json"
+NAV_PROGRESS_PATH = "/dev/shm/nav_progress.json"
 
 # Distance thresholds (meters)
+ARRIVAL_DISTANCE = 30.0
 TURN_DESIRE_ARM_DISTANCE = 100.0
 KEEP_DESIRE_ARM_DISTANCE = 150.0
 REROUTE_DISTANCE = 200.0
@@ -123,9 +125,17 @@ class NavDaemon:
     # GPS state
     self.gps_history: list[dict] = []
     self.current_desire = log.Desire.none
+    self.last_gps_lat: float = 0.0
+    self.last_gps_lon: float = 0.0
+    self.has_gps_fix: bool = False
 
-    # Compute initial route
-    self._compute_route(ROUTE_ORIGIN, ROUTE_DESTINATION)
+    # Dynamic destination state (set via MQTT → /dev/shm/nav_destination.json)
+    self.current_destination: dict | None = None  # {"lat": ..., "lon": ...}
+    self.current_destination_name: str = ""
+    self.destination_timestamp: float = 0.0
+    self.arrived: bool = False
+
+    cloudlog.info("navd: waiting for destination from MQTT")
 
   def _compute_route(self, origin: dict, destination: dict):
     """Compute route via Valhalla."""
@@ -211,11 +221,15 @@ class NavDaemon:
 
     # Check if we need to reroute (too far from route)
     if min_dist > REROUTE_DISTANCE:
-      cloudlog.warning(f"navd: {min_dist:.0f}m off route, rerouting")
-      self._compute_route(
-        {"lat": pos.latitude, "lon": pos.longitude},
-        ROUTE_DESTINATION,
-      )
+      if self.current_destination:
+        cloudlog.warning(f"navd: {min_dist:.0f}m off route, rerouting")
+        self._compute_route(
+          {"lat": pos.latitude, "lon": pos.longitude},
+          self.current_destination,
+        )
+      else:
+        cloudlog.warning("navd: off route but no destination set, clearing route")
+        self.route_valid = False
       return 0, float('inf')
 
     # Find next maneuver that is ahead of current position
@@ -286,23 +300,132 @@ class NavDaemon:
       "timestamp": time.monotonic(),
     }))
 
+  def _poll_destination(self) -> bool:
+    """Check for new destination from MQTT listener. Returns True if destination changed."""
+    try:
+      with open(NAV_DESTINATION_PATH, "r") as f:
+        data = json.loads(f.read())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+      return False
+
+    ts = data.get("timestamp", 0.0)
+    if ts == self.destination_timestamp:
+      return False
+
+    lat = data.get("latitude")
+    lon = data.get("longitude")
+    name = data.get("place_name", "")
+
+    if lat is None or lon is None:
+      cloudlog.warning("navd: destination file missing lat/lon")
+      return False
+
+    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+      cloudlog.warning(f"navd: invalid destination coordinates: {lat}, {lon}")
+      return False
+
+    self.current_destination = {"lat": lat, "lon": lon}
+    self.current_destination_name = name
+    self.destination_timestamp = ts
+    self.arrived = False
+    self.gps_history = []  # reset map matching for new route
+    cloudlog.info(f"navd: new destination received: {name} ({lat:.6f}, {lon:.6f})")
+    return True
+
+  def _check_arrival(self, pos: Coordinate) -> bool:
+    """Check if we've arrived at the destination."""
+    if not self.current_destination or self.arrived:
+      return self.arrived
+
+    dest = Coordinate(self.current_destination["lat"], self.current_destination["lon"])
+    dist = pos.distance_to(dest)
+
+    if dist < ARRIVAL_DISTANCE:
+      cloudlog.info(f"navd: arrived at destination ({dist:.0f}m away)")
+      self.arrived = True
+      self.route_valid = False
+      self.maneuvers = []
+      self._write_desire_param(log.Desire.none, 0.0)
+    return self.arrived
+
+  def _write_progress(self, maneuver_idx: int, distance_to_maneuver: float,
+                      total_remaining: float):
+    """Write navigation progress to /dev/shm for MQTT listener to read."""
+    progress = {
+      "gps": {
+        "latitude": self.last_gps_lat,
+        "longitude": self.last_gps_lon,
+        "has_fix": self.has_gps_fix,
+      },
+      "navigation": {
+        "route_valid": self.route_valid,
+        "arrived": self.arrived,
+        "destination": self.current_destination,
+        "destination_name": self.current_destination_name,
+        "maneuver_index": maneuver_idx,
+        "total_maneuvers": len(self.maneuvers),
+        "distance_to_next_maneuver_m": round(distance_to_maneuver, 1) if distance_to_maneuver != float('inf') else -1,
+        "distance_remaining_m": round(total_remaining, 1),
+        "current_instruction": "",
+        "current_desire": int(self.current_desire),
+      },
+      "timestamp": time.time(),
+    }
+
+    if maneuver_idx < len(self.maneuvers):
+      progress["navigation"]["current_instruction"] = self.maneuvers[maneuver_idx].get("instruction", "")
+
+    tmp_path = NAV_PROGRESS_PATH + ".tmp"
+    try:
+      with open(tmp_path, "w") as f:
+        json.dump(progress, f)
+      os.rename(tmp_path, NAV_PROGRESS_PATH)
+    except OSError as e:
+      cloudlog.debug(f"navd: failed to write progress: {e}")
+
   def tick(self):
-    """Main 1Hz tick: read GPS, match to route, compute desire."""
+    """Main 1Hz tick: poll destination, read GPS, match to route, compute desire."""
+    # Check for new destination from MQTT
+    destination_changed = self._poll_destination()
+
+    # Read GPS
     self.sm.update(0)
 
     if not self.sm.updated['gpsLocationExternal']:
+      self._write_progress(self.current_maneuver_idx, float('inf'), 0.0)
       return
 
     gps = self.sm['gpsLocationExternal']
+    self.has_gps_fix = gps.hasFix
+    self.last_gps_lat = gps.latitude
+    self.last_gps_lon = gps.longitude
+
     if not gps.hasFix:
       self._write_desire_param(log.Desire.none, 0.0)
+      self._write_progress(self.current_maneuver_idx, float('inf'), 0.0)
       return
 
     lat = gps.latitude
     lon = gps.longitude
 
+    # If destination changed, compute new route from current position
+    if destination_changed and self.current_destination:
+      origin = {"lat": lat, "lon": lon}
+      self._compute_route(origin, self.current_destination)
+
+    # No route to navigate
+    if not self.route_valid or not self.current_destination:
+      self._write_desire_param(log.Desire.none, 0.0)
+      self._write_progress(0, float('inf'), 0.0)
+      return
+
     # Map-match GPS to road network
     matched = self._map_match(lat, lon)
+
+    # Check arrival
+    if self._check_arrival(matched):
+      self._write_progress(len(self.maneuvers), 0.0, 0.0)
+      return
 
     # Find current position on route and next maneuver
     maneuver_idx, distance = self._find_current_maneuver(matched)
@@ -320,6 +443,7 @@ class NavDaemon:
     # Publish and write params
     self._publish_nav_instruction(maneuver_idx, distance, total_remaining)
     self._write_desire_param(desire, distance)
+    self._write_progress(maneuver_idx, distance, total_remaining)
 
     desire_name = {0: "none", 1: "turnLeft", 2: "turnRight",
                    3: "lcLeft", 4: "lcRight", 5: "keepLeft", 6: "keepRight"}.get(int(desire), "?")

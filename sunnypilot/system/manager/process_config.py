@@ -110,9 +110,9 @@ def and_(*fns):
 procs = [
   DaemonProcess("manage_athenad", "system.athena.manage_athenad", "AthenadPid"),
 
-  NativeProcess("loggerd", "system/loggerd", ["./loggerd"], logging),
-  NativeProcess("encoderd", "system/loggerd", ["./encoderd"], only_onroad),
-  NativeProcess("stream_encoderd", "system/loggerd", ["./encoderd", "--stream"], notcar),
+  NativeProcess("loggerd", "system/loggerd", ["./loggerd"], logging, enabled=not JETSON),
+  NativeProcess("encoderd", "system/loggerd", ["./encoderd"], only_onroad, enabled=not JETSON),
+  NativeProcess("stream_encoderd", "system/loggerd", ["./encoderd", "--stream"], notcar, enabled=not JETSON),
   PythonProcess("logmessaged", "system.logmessaged", always_run),
 
   NativeProcess("camerad", "system/camerad", ["./camerad"], driverview, enabled=not WEBCAM and not JETSON),
@@ -129,8 +129,8 @@ procs = [
   PythonProcess("sensord", "system.sensord.sensord", only_onroad, enabled=not PC and not JETSON),
   PythonProcess("serial_imu", "system.sensord.serial_imu", only_onroad, enabled=JETSON),
   PythonProcess("serial_gps", "system.sensord.serial_gps", only_onroad, enabled=JETSON),
-  PythonProcess("ui", "selfdrive.ui.ui", always_run, restart_if_crash=True),
-  PythonProcess("soundd", "selfdrive.ui.soundd", driverview),
+  PythonProcess("ui", "selfdrive.ui.ui", always_run, restart_if_crash=True, enabled=not JETSON),
+  PythonProcess("soundd", "selfdrive.ui.soundd", driverview, enabled=not JETSON),
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),
   NativeProcess("_pandad", "selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", only_onroad),
@@ -188,7 +188,7 @@ procs += [
   PythonProcess("navd", "sunnypilot.navd.navd", only_onroad, enabled=JETSON),
 
   # locationd
-  NativeProcess("locationd_llk", "sunnypilot/selfdrive/locationd", ["./locationd"], only_onroad),
+  NativeProcess("locationd_llk", "sunnypilot/selfdrive/locationd", ["./locationd"], only_onroad, enabled=not JETSON),
 ]
 
 if os.path.exists("./github_runner.sh"):

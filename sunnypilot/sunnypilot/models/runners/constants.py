@@ -1,6 +1,11 @@
 import os
 import numpy as np
-from openpilot.sunnypilot.modeld_v2.models.commonmodel_pyx import DrivingModelFrame, CLMem
+try:
+  from openpilot.sunnypilot.modeld_v2.models.commonmodel_pyx import DrivingModelFrame, CLMem
+except ImportError:
+  # Jetson: tinygrad/OpenCL Cython module not available
+  DrivingModelFrame = None
+  CLMem = None
 from openpilot.system.hardware.hw import Paths
 from cereal import custom
 
