@@ -24,6 +24,16 @@ from openpilot.system.hardware import PC
 
 
 def manager_init() -> None:
+  # Jetson Thor: ensure CuPy/CUDA libs are findable by forked child processes
+  _cuda_lib = '/usr/local/cuda/lib64'
+  _venv_lib = os.path.join(os.path.dirname(__file__), '..', '..', '.venv', 'lib')
+  _venv_lib = os.path.abspath(_venv_lib)
+  _ldpath = os.environ.get('LD_LIBRARY_PATH', '')
+  for p in [_venv_lib, _cuda_lib]:
+    if p not in _ldpath:
+      _ldpath = p + (':' + _ldpath if _ldpath else '')
+  os.environ['LD_LIBRARY_PATH'] = _ldpath
+
   save_bootlog()
 
   build_metadata = get_build_metadata()

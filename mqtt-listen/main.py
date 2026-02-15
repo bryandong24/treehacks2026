@@ -121,8 +121,8 @@ def progress_reader(client):
         print(f"[NAV] {nav_payload}")
 
         time.sleep(PROGRESS_POLL_RATE)
-
-
+# s
+# s
 def main():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_connect

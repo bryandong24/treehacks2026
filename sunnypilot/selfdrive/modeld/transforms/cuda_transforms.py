@@ -11,7 +11,18 @@ Pipeline:
     -> numpy array -> ONNX Runtime
 """
 
+import os
+import ctypes
 import numpy as np
+
+# Preload libnvrtc.so.12 for CuPy on Jetson Thor (CUDA 13 ships libnvrtc.so.13)
+_venv_lib = os.path.join(os.path.dirname(__file__), '..', '..', '..', '.venv', 'lib')
+_nvrtc_path = os.path.join(os.path.abspath(_venv_lib), 'libnvrtc.so.12')
+if not os.path.exists(_nvrtc_path):
+  _nvrtc_path = '/usr/local/cuda/lib64/libnvrtc.so.12'
+if os.path.exists(_nvrtc_path):
+  ctypes.CDLL(_nvrtc_path, mode=ctypes.RTLD_GLOBAL)
+
 import cupy as cp
 
 # --- CUDA Warp Perspective Kernel ---
