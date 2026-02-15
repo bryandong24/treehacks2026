@@ -1,4 +1,5 @@
 import paho.mqtt.client as mqtt
+import subprocess
 import threading
 import json
 import time
@@ -149,11 +150,6 @@ def main():
     print(f"Connecting to {BROKER}:{PORT}...")
     client.connect(BROKER, PORT, keepalive=60)
 
-    # Start progress reader in a background thread
-    progress_thread = threading.Thread(target=progress_reader, args=(client,), daemon=True)
-    progress_thread.start()
-    print(f"Started progress reader, polling {NAV_PROGRESS_PATH}")
-    print(f"Publishing GPS to {GPS_TOPIC}, nav status to {NAV_STATUS_TOPIC}")
     # Start GPS reader — reads serial port, publishes to MQTT
     gps_thread = threading.Thread(target=gps_reader, args=(client,), daemon=True)
     gps_thread.start()
