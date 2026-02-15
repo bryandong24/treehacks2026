@@ -6,8 +6,9 @@ from openpilot.system.hardware.tici.hardware import Tici
 from openpilot.system.hardware.pc.hardware import Pc
 
 TICI = os.path.isfile('/TICI')
+JETSON = os.path.isfile('/JETSON')
 AGNOS = os.path.isfile('/AGNOS')
-PC = not TICI
+PC = not TICI and not JETSON
 
 
 if TICI:

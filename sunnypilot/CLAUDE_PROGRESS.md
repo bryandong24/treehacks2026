@@ -169,11 +169,33 @@
 - **Timestamp fix**: sensor `event.timestamp` must use `time.monotonic_ns()` (not `time.time_ns()`) because locationd compares it against `logMonoTime` which uses the monotonic clock. Wall clock differs from monotonic by ~56 years on this Jetson.
 - **Note**: Kalman filter acceleration/angular velocity estimates drift with mock cameraOdometry (zero motion conflicts with real gravity vector). This is expected and will resolve with real visual odometry.
 
+### 14. Platform Integration & Pandad for Jetson — DONE
+- **Hardware detection**: Modified `system/hardware/__init__.py` to add `JETSON = os.path.isfile('/JETSON')` flag
+  - `PC = not TICI and not JETSON` — Jetson is no longer treated as PC mode
+  - Still uses `Pc()` hardware class (no custom JetsonThor class needed)
+  - This unblocks all processes gated by `enabled=not PC` (sensord, dmonitoringmodeld, dmonitoringd, timed, etc.)
+- **Marker file**: Requires `sudo touch /JETSON` on the Jetson device
+- **Process manager**: Updated `system/manager/process_config.py`:
+  - Imported `JETSON` flag from hardware module
+  - Stock `sensord` (I2C-based) gated with `enabled=not PC and not JETSON` (won't run on Jetson)
+  - Added `serial_imu` process (`system.sensord.serial_imu`) with `enabled=JETSON` — uses our USB-UART IMU daemon
+- **C++ pandad binary**: Compiled for aarch64 Jetson Thor using scons
+  - `scons --minimal -j$(nproc) selfdrive/pandad/pandad`
+  - Built with clang++ 18.1.3, links against libusb-1.0, libzmq, libcapnp, common, messaging
+  - Binary: `selfdrive/pandad/pandad` (4.7MB, ELF 64-bit ARM aarch64)
+  - Smoke tested: starts, attempts USB connection (no panda attached), falls back to SPI (expected failure)
+  - On Jetson (no `__TICI__` define), uses `HardwarePC` C++ class — skips RT priority/core affinity (safe)
+  - Panda connection strategy: USB first → SPI fallback. External red panda via USB works.
+- **Car interface code** (card.py, controlsd.py, Honda carcontroller/carstate/hondacan) is 100% hardware-agnostic — no changes needed
+- **Data flow verified** (architecture review):
+  - `modeld` → `modelV2` (cereal) → `controlsd` (100Hz) → `carControl` → `card.py` → `CarInterface.apply()` → Honda `CarController` → CAN frames → `sendcan` (cereal) → C++ `pandad` → USB → red panda → CAN bus → Honda ECUs
+  - Reverse: Honda ECUs → CAN bus → red panda → USB → C++ `pandad` → `can` (cereal) → `card.py` → Honda `CarState` → `carState` (cereal) → `controlsd`
+
 ---
 
 ## TODO — Next Steps
 
-### 14. Camera Integration
+### 15. Camera Integration
 - Our cameras: 120-degree FOV + 90-degree FOV
 - Sunnypilot expects:
   - `fcam`: ~52-degree FOV (comma OX03C10/OS04C10)
@@ -184,23 +206,24 @@
   - The warp matrix compensates for FOV differences, but intrinsics must be correct
   - Test with VisionIPC or write a custom camera feed adapter
 
-### 15. GPS Integration
+### 16. GPS Integration
 - GPS feeds into `locationd` for position — needed for navigation but less critical than IMU for core driving
 
-### 16. Honda Bosch CAN Interface
+### 17. Honda Bosch CAN Interface
 - Vehicle: Honda Bosch platform
-- Need panda OBD-II adapter (or compatible CAN interface) connected to Jetson
+- Need red panda OBD-II adapter connected to Jetson via USB
 - Verify opendbc Honda Bosch DBC definitions work
 - Test CAN read (steering angle, wheel speeds, brake) and CAN write (steering torque, gas, brake)
+- C++ pandad binary is compiled and ready — will connect to red panda over USB
 
-### 17. VisionIPC / Camera Pipeline
+### 18. VisionIPC / Camera Pipeline
 - Stock sunnypilot uses `camerad` → VisionIPC shared memory → `modeld`
 - Need to either:
   - Write a custom `camerad` for our camera hardware on Jetson
   - Or feed frames via V4L2 → VisionIPC adapter
 - Must provide both road and wide camera streams simultaneously
 
-### 18. Full System Integration Test
+### 19. Full System Integration Test
 - Run full sunnypilot stack on Jetson Thor with:
   - Camera feeds (both streams)
   - ONNX models on CUDA
@@ -242,8 +265,15 @@
                │
                ▼
 ┌─────────────────────────────────┐
-│  Controls (steering, accel)     │
-│  → CAN bus → Honda Bosch        │
+│  controlsd (100Hz)  ✅           │
+│  → carControl → card.py         │
+└──────────────┬──────────────────┘
+               │ sendcan (cereal IPC)
+               ▼
+┌─────────────────────────────────┐
+│  C++ pandad (USB relay)  ✅      │
+│  → Red Panda → CAN bus          │
+│  → Honda Bosch ECUs             │
 └─────────────────────────────────┘
 
         ┌──────────┐  ┌──────────┐
