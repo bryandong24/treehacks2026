@@ -115,18 +115,20 @@ procs = [
   NativeProcess("stream_encoderd", "system/loggerd", ["./encoderd", "--stream"], notcar),
   PythonProcess("logmessaged", "system.logmessaged", always_run),
 
-  NativeProcess("camerad", "system/camerad", ["./camerad"], driverview, enabled=not WEBCAM),
+  NativeProcess("camerad", "system/camerad", ["./camerad"], driverview, enabled=not WEBCAM and not JETSON),
   PythonProcess("webcamerad", "tools.webcam.camerad", driverview, enabled=WEBCAM),
+  PythonProcess("jetson_camerad", "selfdrive.camerad.jetson_camerad", driverview, enabled=JETSON),
   PythonProcess("proclogd", "system.proclogd", only_onroad, enabled=platform.system() != "Darwin"),
   PythonProcess("journald", "system.journald", only_onroad, platform.system() != "Darwin"),
   PythonProcess("micd", "system.micd", iscar),
   PythonProcess("timed", "system.timed", always_run, enabled=not PC),
 
   PythonProcess("modeld", "selfdrive.modeld.modeld", and_(only_onroad, is_stock_model)),
-  PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
+  PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC) and not JETSON),
 
   PythonProcess("sensord", "system.sensord.sensord", only_onroad, enabled=not PC and not JETSON),
   PythonProcess("serial_imu", "system.sensord.serial_imu", only_onroad, enabled=JETSON),
+  PythonProcess("serial_gps", "system.sensord.serial_gps", only_onroad, enabled=JETSON),
   PythonProcess("ui", "selfdrive.ui.ui", always_run, restart_if_crash=True),
   PythonProcess("soundd", "selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),
@@ -138,7 +140,8 @@ procs = [
   PythonProcess("selfdrived", "selfdrive.selfdrived.selfdrived", only_onroad),
   PythonProcess("card", "selfdrive.car.card", only_onroad),
   PythonProcess("deleter", "system.loggerd.deleter", always_run),
-  PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", driverview, enabled=(WEBCAM or not PC)),
+  PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", driverview, enabled=(WEBCAM or not PC) and not JETSON),
+  PythonProcess("mock_dmonitoringd", "selfdrive.monitoring.mock_dmonitoringd", only_onroad, enabled=JETSON),
   PythonProcess("qcomgpsd", "system.qcomgpsd.qcomgpsd", qcomgps, enabled=TICI),
   PythonProcess("pandad", "selfdrive.pandad.pandad", always_run),
   PythonProcess("paramsd", "selfdrive.locationd.paramsd", only_onroad),
@@ -180,6 +183,9 @@ procs += [
   # mapd
   NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready),
   PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run),
+
+  # Navigation (Jetson only - offline Valhalla routing)
+  PythonProcess("navd", "sunnypilot.navd.navd", only_onroad, enabled=JETSON),
 
   # locationd
   NativeProcess("locationd_llk", "sunnypilot/selfdrive/locationd", ["./locationd"], only_onroad),

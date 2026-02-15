@@ -3,6 +3,7 @@ from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeController, AutoLaneChangeMode
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_turn_desire import LaneTurnController
+from openpilot.sunnypilot.selfdrive.controls.lib.nav_desire import NavDesireController
 
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
@@ -50,6 +51,7 @@ class DesireHelper:
     self.desire = log.Desire.none
     self.alc = AutoLaneChangeController(self)
     self.lane_turn_controller = LaneTurnController(self)
+    self.nav_desire_controller = NavDesireController(self)
     self.lane_turn_direction = TurnDirection.none
 
   @staticmethod
@@ -59,6 +61,7 @@ class DesireHelper:
   def update(self, carstate, lateral_active, lane_change_prob):
     self.alc.update_params()
     self.lane_turn_controller.update_params()
+    self.nav_desire_controller.update_params()
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
@@ -127,7 +130,11 @@ class DesireHelper:
 
     self.prev_one_blinker = one_blinker
 
-    if self.lane_turn_direction != TurnDirection.none:
+    # Priority: nav desire (route turns) > lane turn desire (blinker) > lane change desire
+    nav_desire = self.nav_desire_controller.get_desire()
+    if nav_desire != log.Desire.none:
+      self.desire = nav_desire
+    elif self.lane_turn_direction != TurnDirection.none:
       self.desire = TURN_DESIRES[self.lane_turn_direction]
     else:
       self.desire = DESIRES[self.lane_change_direction][self.lane_change_state]

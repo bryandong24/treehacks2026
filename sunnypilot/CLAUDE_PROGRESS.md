@@ -195,35 +195,66 @@
 
 ## TODO — Next Steps
 
-### 15. Camera Integration
-- Our cameras: 120-degree FOV + 90-degree FOV
-- Sunnypilot expects:
-  - `fcam`: ~52-degree FOV (comma OX03C10/OS04C10)
-  - `ecam`: ~120-degree FOV (comma AR0231)
-- Need to:
-  - Map our cameras to fcam/ecam roles (90-degree → fcam, 120-degree → ecam)
-  - Adjust camera intrinsics in `common/transformations/camera.py`
-  - The warp matrix compensates for FOV differences, but intrinsics must be correct
-  - Test with VisionIPC or write a custom camera feed adapter
+### 15. Camera Integration — DONE
+- Two IMX274 cameras via Holoscan Sensor Bridge (NVIDIA's camera framework)
+  - Camera 0 (right, 90° FOV) → `fcam` (VISION_STREAM_ROAD)
+  - Camera 1 (left, 120° FOV) → `ecam` (VISION_STREAM_WIDE_ROAD)
+- Architecture: Docker container (Holoscan) → /dev/shm ring buffers → host (sunnypilot)
+- New files created:
+  - `selfdrive/camerad/shm_buffer.py` — lock-free shared memory ring buffer (4 slots, 64-byte header, sequence-counter torn-read detection)
+  - `selfdrive/camerad/holoscan_frame_publisher.py` — runs inside Docker, captures from Holoscan pipeline, converts RGBA uint16 → NV12 uint8 via CuPy CUDA kernel, writes to /dev/shm
+  - `selfdrive/camerad/jetson_camerad.py` — runs on host, reads /dev/shm, publishes via VisionIPC + cereal roadCameraState/wideRoadCameraState at 20Hz
+- Camera intrinsics added to `common/transformations/camera.py`:
+  - `("jetson", "imx274")`: fcam 1920x1080 fl=960 (90° HFOV), ecam 1920x1080 fl=555 (120° HFOV)
+- Process config updated: stock camerad disabled on Jetson, jetson_camerad enabled
+- FOV handling: warp matrix in modeld automatically crops/warps wider FOV to model's expected ~52° effective FOV using camera intrinsics
+- shm_buffer unit test PASSED (write/read/no-new-frame detection)
 
-### 16. GPS Integration
-- GPS feeds into `locationd` for position — needed for navigation but less critical than IMU for core driving
+### 16. GPS Integration — DONE
+- **Hardware**: Adafruit Ultimate GPS FeatherWing via QinHeng CH9102 USB-UART (`/dev/ttyACM0`)
+- **udev rule**: `system/hardware/tici/14-gps.rules` creates `/dev/GPS` symlink (needs `sudo cp` to `/etc/udev/rules.d/`)
+- **Daemon**: `system/sensord/serial_gps.py`
+  - Reads CSV `lat,lon,alt` at 460800 baud, 10Hz
+  - Computes speed (haversine) and bearing (atan2) from consecutive fixes
+  - Publishes `gpsLocationExternal` via cereal, writes `LastGPSPosition` to `/dev/shm/params`
+  - Falls back to `/dev/ttyACM0` if `/dev/GPS` symlink not installed
+- **Verified**: 3+ valid GPS fixes read from hardware (lat=37.4256, lon=-122.1769)
 
-### 17. Honda Bosch CAN Interface
+### 17. Navigation System (Valhalla + NavDesire) — DONE
+- **Goal**: Offline turn-by-turn routing → model desire inputs for a hardcoded Stanford campus route
+- **Route**: 37.425611,-122.177434 → 37.429649,-122.170194 (2.25km, 9 maneuvers)
+- **Stack**:
+  - `pyvalhalla` 3.6.2 (pre-built aarch64 wheel) — offline routing + GPS map matching
+  - Stanford-area OSM data downloaded via Overpass API (bbox 37.400,-122.230 to 37.450,-122.120)
+  - Tiles built: `data/valhalla/tiles/` (~897KB PBF from 17MB XML)
+  - `valhalla.Actor(config_path)` for route + trace_route (map matching)
+- **New files**:
+  - `sunnypilot/navd/navd.py` — Navigation daemon (1Hz): computes route, tracks position via GPS, determines desire
+    - Maneuver type → Desire mapping (turnRight, turnLeft, keepLeft, keepRight)
+    - Arm distances: 100m for turns, 150m for keeps/exits
+    - Reroutes if >200m off route
+    - Publishes `navInstruction` cereal + `NavDesire` JSON to `/dev/shm/params`
+  - `sunnypilot/selfdrive/controls/lib/nav_desire.py` — NavDesireController (reads NavDesire param, 3s staleness check)
+  - `selfdrive/controls/lib/desire_helper.py` — Modified: nav desire > lane turn desire > lane change desire priority
+  - `scripts/setup_valhalla.sh` — Automated OSM download + tile build
+  - `scripts/test_nav_e2e.py` — 4-part E2E test suite
+- **Params**: Added `NavDesire` (STRING type) to `common/params_keys.h`, recompiled `params_pyx.so`
+- **Process config**: `serial_gps` + `navd` registered in `process_config.py` (Jetson-only)
+- **Pipeline**: GPS → serial_gps → gpsLocationExternal → navd → NavDesire param → desire_helper → desire_pulse → driving_policy.onnx
+- **E2E tests**: 4/4 PASS
+  1. GPS hardware reads valid fixes from serial port
+  2. Valhalla routing: 9 maneuvers, polyline decoding, map matching
+  3. NavDesire param round-trip + staleness detection
+  4. Simulated drive: correct turnRight/turnLeft desires at maneuver approaches
+
+### 19. Honda Bosch CAN Interface
 - Vehicle: Honda Bosch platform
 - Need red panda OBD-II adapter connected to Jetson via USB
 - Verify opendbc Honda Bosch DBC definitions work
 - Test CAN read (steering angle, wheel speeds, brake) and CAN write (steering torque, gas, brake)
 - C++ pandad binary is compiled and ready — will connect to red panda over USB
 
-### 18. VisionIPC / Camera Pipeline
-- Stock sunnypilot uses `camerad` → VisionIPC shared memory → `modeld`
-- Need to either:
-  - Write a custom `camerad` for our camera hardware on Jetson
-  - Or feed frames via V4L2 → VisionIPC adapter
-- Must provide both road and wide camera streams simultaneously
-
-### 19. Full System Integration Test
+### 20. Full System Integration Test
 - Run full sunnypilot stack on Jetson Thor with:
   - Camera feeds (both streams)
   - ONNX models on CUDA
@@ -277,8 +308,8 @@
 └─────────────────────────────────┘
 
         ┌──────────┐  ┌──────────┐
-        │   IMU  ✅ │  │   GPS    │
-        │ (104 Hz) │  │          │
+        │   IMU  ✅ │  │  GPS  ✅ │
+        │ (104 Hz) │  │ (10 Hz)  │
         └────┬─────┘  └────┬─────┘
              │             │
              ▼             ▼
@@ -286,6 +317,13 @@
         │  locationd (Kalman)✅│
         │  → livePose         │
         └─────────────────────┘
+
+        ┌──────────────────────────────┐
+        │  navd (1Hz) ✅                │
+        │  Valhalla offline routing    │
+        │  GPS → map match → desire   │
+        │  → NavDesire → desire_helper │
+        └──────────────────────────────┘
 ```
 
 ---

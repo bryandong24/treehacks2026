@@ -1,0 +1,3 @@
+# QinHeng CH9102 USB-to-UART (GPS FeatherWing)
+# Creates /dev/GPS symlink with read/write permissions for all users
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", ATTRS{serial}=="5A6C040684", SYMLINK+="GPS", MODE="0666"

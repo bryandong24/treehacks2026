@@ -1,3 +1,5 @@
+.venv
+
 # Binary files
 *.bin
 *.pkl
@@ -85,3 +87,5 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+mqtt-listen/venv/lib64
+mqtt-listen/venv

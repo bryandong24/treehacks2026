@@ -1,5 +1,5 @@
 import paho.mqtt.client as mqtt
-import serial
+import subprocess
 import threading
 import json
 import time
@@ -10,7 +10,7 @@ SUBSCRIBE_TOPIC = "from-phone/command-car"
 PUBLISH_TOPIC = "from-car/gps-info"
 
 SERIAL_PORT = "/dev/ttyACM0"
-SERIAL_BAUD = 460800
+SERIAL_BAUD = "460800"
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -26,31 +26,46 @@ def on_message(client, userdata, msg):
     print(f"[{msg.topic}] {msg.payload.decode()}")
 
 
-def serial_reader(client):
-    """Read lines from /dev/ttyACM0 and publish to MQTT."""
+def gps_reader(client):
+    """Run listen.sh approach: stty + cat, parse output, publish to MQTT."""
     while True:
         try:
-            ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
-            print(f"Opened serial port {SERIAL_PORT} at {SERIAL_BAUD} baud")
-            while True:
-                line = ser.readline()
-                if line:
-                    decoded = line.decode("utf-8", errors="replace").strip()
-                    if decoded:
-                        parts = decoded.split(",")
-                        if len(parts) >= 2:
-                            payload = json.dumps({
-                                "latitude": float(parts[0]),
-                                "longitude": float(parts[1]),
-                                "timestamp": time.time(),
-                            })
-                            print(f"[GPS] {payload}")
-                            client.publish(PUBLISH_TOPIC, payload)
-        except serial.SerialException as e:
-            print(f"Serial error: {e} — retrying in 2s...")
-            time.sleep(2)
+            # Configure the serial port just like listen.sh
+            subprocess.run(
+                ["stty", "-F", SERIAL_PORT, SERIAL_BAUD, "raw", "-echo"],
+                check=True,
+            )
+            print(f"Configured {SERIAL_PORT} at {SERIAL_BAUD} baud (raw)")
+
+            # Stream cat output line by line
+            proc = subprocess.Popen(
+                ["cat", SERIAL_PORT],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            print(f"Reading from {SERIAL_PORT}...")
+
+            for raw_line in proc.stdout:
+                decoded = raw_line.decode("utf-8", errors="replace").strip()
+                if not decoded:
+                    continue
+                parts = decoded.split(",")
+                if len(parts) >= 2:
+                    try:
+                        payload = json.dumps({
+                            "latitude": float(parts[0]),
+                            "longitude": float(parts[1]),
+                            "timestamp": time.time(),
+                        })
+                        print(f"[GPS] {payload}")
+                        client.publish(PUBLISH_TOPIC, payload)
+                    except ValueError:
+                        print(f"[GPS] skipping bad line: {decoded}")
+
+            proc.wait()
+            print(f"cat process exited with code {proc.returncode}, restarting...")
         except Exception as e:
-            print(f"Unexpected error reading serial: {e} — retrying in 2s...")
+            print(f"GPS reader error: {e} — retrying in 2s...")
             time.sleep(2)
 
 
@@ -62,10 +77,10 @@ def main():
     print(f"Connecting to {BROKER}:{PORT}...")
     client.connect(BROKER, PORT, keepalive=60)
 
-    # Start serial reader in a background thread
-    gps_thread = threading.Thread(target=serial_reader, args=(client,), daemon=True)
+    # Start GPS reader in a background thread
+    gps_thread = threading.Thread(target=gps_reader, args=(client,), daemon=True)
     gps_thread.start()
-    print(f"Started GPS serial reader on {SERIAL_PORT}, publishing to {PUBLISH_TOPIC}")
+    print(f"Started GPS reader ({SERIAL_PORT}), publishing to {PUBLISH_TOPIC}")
 
     client.loop_forever()
 

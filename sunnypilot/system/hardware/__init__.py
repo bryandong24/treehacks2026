@@ -11,7 +11,13 @@ AGNOS = os.path.isfile('/AGNOS')
 PC = not TICI and not JETSON
 
 
+class Jetson(Pc):
+  def get_device_type(self):
+    return "pc"  # cereal schema only has: unknown, neo, tici, pc, tizi, mici
+
 if TICI:
   HARDWARE = cast(HardwareBase, Tici())
+elif JETSON:
+  HARDWARE = cast(HardwareBase, Jetson())
 else:
   HARDWARE = cast(HardwareBase, Pc())
