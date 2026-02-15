@@ -123,6 +123,19 @@ Thor cameras + livePose → WebSocket (msgpack) → H100 server → Alpamayo R1 
 
 The server also relays a live JPEG video feed from the car to the app via a second WebSocket endpoint.
 
+### On-Device Alpamayo Distillation (Coming Soon)
+Running Alpamayo on a remote H100 works, but introduces network latency and a dependency on cloud connectivity — not ideal for a safety-critical driving system. Our goal is to distill Alpamayo R1 down to a model small enough to run directly on the Jetson AGX Thor in real time.
+
+This is a significant undertaking. Alpamayo R1 is a 10B parameter Vision-Language-Action model with two distinct components that both need to be preserved through distillation:
+- A **VLM backbone** (Cosmos-Reason) that generates Chain-of-Causation reasoning from multi-camera video + ego-motion history
+- A **flow-matching diffusion action decoder** that produces trajectory predictions conditioned on the VLM's reasoning
+
+Distilling a model of this scale while retaining both the reasoning quality and the trajectory accuracy — especially on long-tail driving scenarios where CoC reasoning matters most — requires careful multi-stage training and extensive validation.
+
+For on-device inference, we are using [Thunder Kittens](https://github.com/HazyResearch/ThunderKittens) and [TensorRT-Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM) to write hyperoptimized CUDA kernels targeting a quantized version of the distilled model in **NVFP4** (4-bit floating point). This combination should allow us to hit real-time inference on the Thor's Blackwell GPU.
+
+Stay tuned for future updates.
+
 ### Platform Integration
 - Hardware detection via `/JETSON` marker file
 - C++ pandad binary compiled for aarch64 — connects to red panda over USB
