@@ -22,7 +22,7 @@ from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
 from openpilot.system.version import get_build_metadata
-from openpilot.system.hardware import HARDWARE
+from openpilot.system.hardware import HARDWARE, JETSON
 
 from openpilot.sunnypilot.mads.mads import ModularAssistiveDrivingSystem
 from openpilot.sunnypilot import get_sanitize_int_param
@@ -92,6 +92,8 @@ class SelfdriveD(CruiseHelper):
     ignore = self.sensor_packets + self.gps_packets + ['alertDebug'] + ['modelDataV2SP']
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
+    if JETSON:
+      ignore += ['driverCameraState']
     if REPLAY:
       # no vipc in replay will make them ignored anyways
       ignore += ['roadCameraState', 'wideRoadCameraState']
@@ -580,7 +582,28 @@ class SelfdriveD(CruiseHelper):
     CS = self.data_sample()
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
+      # DEBUG: log all active events every second, and always on state change
+      prev_state = self.state_machine.state
       self.enabled, self.active = self.state_machine.update(self.events)
+      new_state = self.state_machine.state
+      if new_state != prev_state or (self.sm.frame % 100 == 0 and len(self.events)):
+        event_names = self.events.names
+        disable_events = {e for e in event_names if self.events.contains(ET.IMMEDIATE_DISABLE) or self.events.contains(ET.SOFT_DISABLE)}
+        cloudlog.warning(f"DIAG state {prev_state}->{new_state} enabled={self.enabled} events={event_names} "
+                         f"mismatch_ctr={self.mismatch_counter}")
+        if not self.sm.all_checks():
+          cloudlog.warning(f"DIAG sm checks: invalid={[s for s, v in self.sm.valid.items() if not v]} "
+                           f"not_alive={[s for s, a in self.sm.alive.items() if not a]} "
+                           f"not_freq_ok={[s for s, f in self.sm.freq_ok.items() if not f]}")
+        if self.sm.recv_frame.get('livePose', 0) > 0:
+          lp = self.sm['livePose']
+          cloudlog.warning(f"DIAG livePose: inputsOK={lp.inputsOK} sensorsOK={lp.sensorsOK} posenetOK={lp.posenetOK}")
+        for i, ps in enumerate(self.sm['pandaStates']):
+          cloudlog.warning(f"DIAG panda[{i}]: controlsAllowed={ps.controlsAllowed} safetyModel={ps.safetyModel} "
+                           f"safetyRxChecksInvalid={ps.safetyRxChecksInvalid}")
+        not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
+        if not_running:
+          cloudlog.warning(f"DIAG processNotRunning: {not_running}")
     if not self.CP.notCar:
       self.mads.update(CS)
     self.update_alerts(CS)

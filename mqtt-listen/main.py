@@ -10,6 +10,9 @@ SUBSCRIBE_TOPIC = "from-phone/command-car"
 GPS_TOPIC = "from-car/gps-info"
 NAV_STATUS_TOPIC = "from-car/nav-status"
 
+SERIAL_PORT = "/dev/ttyACM0"
+SERIAL_BAUD = "460800"
+
 NAV_DESTINATION_PATH = "/dev/shm/nav_destination.json"
 NAV_PROGRESS_PATH = "/dev/shm/nav_progress.json"
 PROGRESS_POLL_RATE = 1.0  # seconds — match navd 1Hz rate
@@ -46,6 +49,47 @@ def on_message(client, userdata, msg):
             print(f"[NAV] Set destination: {nav_dest}")
     except Exception as e:
         print(f"[NAV] Error parsing command: {e}")
+
+
+def gps_reader(client):
+    """Read GPS from serial port, publish to MQTT."""
+    while True:
+        try:
+            subprocess.run(
+                ["stty", "-F", SERIAL_PORT, SERIAL_BAUD, "raw", "-echo"],
+                check=True,
+            )
+            print(f"[GPS] Configured {SERIAL_PORT} at {SERIAL_BAUD} baud")
+
+            proc = subprocess.Popen(
+                ["cat", SERIAL_PORT],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            print(f"[GPS] Reading from {SERIAL_PORT}...")
+
+            for raw_line in proc.stdout:
+                decoded = raw_line.decode("utf-8", errors="replace").strip()
+                if not decoded:
+                    continue
+                parts = decoded.split(",")
+                if len(parts) >= 2:
+                    try:
+                        payload = json.dumps({
+                            "latitude": float(parts[0]),
+                            "longitude": float(parts[1]),
+                            "timestamp": time.time(),
+                        })
+                        print(f"[GPS] {payload}")
+                        client.publish(GPS_TOPIC, payload)
+                    except ValueError:
+                        print(f"[GPS] skipping bad line: {decoded}")
+
+            proc.wait()
+            print(f"[GPS] cat exited with code {proc.returncode}, restarting...")
+        except Exception as e:
+            print(f"[GPS] reader error: {e} — retrying in 2s...")
+            time.sleep(2)
 
 
 def progress_reader(client):
@@ -110,6 +154,16 @@ def main():
     progress_thread.start()
     print(f"Started progress reader, polling {NAV_PROGRESS_PATH}")
     print(f"Publishing GPS to {GPS_TOPIC}, nav status to {NAV_STATUS_TOPIC}")
+    # Start GPS reader — reads serial port, publishes to MQTT
+    gps_thread = threading.Thread(target=gps_reader, args=(client,), daemon=True)
+    gps_thread.start()
+    print(f"Started GPS reader ({SERIAL_PORT}), publishing to {GPS_TOPIC}")
+
+    # Start progress reader — polls navd output, publishes nav status to MQTT
+    progress_thread = threading.Thread(target=progress_reader, args=(client,), daemon=True)
+    progress_thread.start()
+    print(f"Started progress reader, polling {NAV_PROGRESS_PATH}")
+    print(f"Publishing nav status to {NAV_STATUS_TOPIC}")
 
     client.loop_forever()
 
